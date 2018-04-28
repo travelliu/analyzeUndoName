@@ -23,11 +23,10 @@ our $trcfd;
 our $traceFile;
 our $dbstatus = 'NO';
 our $dbversion;
-
 our $undoSegFile=0;
 our $undoSegBlock=0;
 our %dbfname;
-our @undosegname;
+our @undoInfo;
 our $rootdba;
 ## <<---------------------[ Begin Function ]--------------------------->>
 
@@ -150,6 +149,34 @@ sub GetHostName{
     return $shorthost;
 }
 
+sub GetTraceName {
+    my $sql = shift;
+    my $traceFileName;
+
+    # my $sql = "alter system set events 'immediate trace name file_hdrs level 3'";
+    my $fineTraceSql = q^SELECT d.VALUE || '/' || RTRIM(i.INSTANCE, CHR(0)) || '_ora_' ||
+           p.spid || '.trc' trace_file_name
+      FROM (SELECT p.spid
+              FROM v$mystat m, v$session s, v$process p
+             WHERE m.statistic# = 1
+               AND s.SID = m.SID
+               AND p.addr = s.paddr) p,
+           (SELECT t.INSTANCE
+              FROM v$thread t, v$parameter v
+             WHERE v.NAME = 'thread'
+               AND (v.VALUE = '0' OR to_char(t.thread#) = v.VALUE)) i,
+           (SELECT VALUE FROM v$parameter WHERE NAME = 'user_dump_dest') d
+           ^;
+
+    $sql = $sql . "\n".$fineTraceSql;
+
+    my @sqlResult = ExecuteSQL($sql);
+
+    $traceFileName = $sqlResult[0];
+
+    return $traceFileName;
+}
+
 sub RunSystemCmd{
     my $rc  = 0;
     my $prc = 0;
@@ -268,6 +295,7 @@ sub CheckDBStatus{
         $dbstatus = "OK";
     }
 }
+
 sub CheckTS{
     my $sql = "select rfile#,name from v\$datafile where ts#=0";
     my @sqlResult = ExecuteSQL($sql);
@@ -282,23 +310,9 @@ sub CheckTS{
 sub DumpSegment{
     my ($filenum,$fileblock) = @_;
     my %blockmap;
-    my $sql = "alter system dump datafile '".$dbfname{$filenum}."' block ".$fileblock;
-    my $sql1 = "SELECT d.VALUE || '/' || LOWER(RTRIM(i.INSTANCE, CHR(0))) || '_ora_' ||
-           p.spid || '.trc' trace_file_name
-      FROM (SELECT p.spid
-              FROM v\$mystat m, v\$session s, v\$process p
-             WHERE m.statistic# = 1
-               AND s.SID = m.SID
-               AND p.addr = s.paddr) p,
-           (SELECT t.INSTANCE
-              FROM v\$thread t, v\$parameter v
-             WHERE v.NAME = 'thread'
-               AND (v.VALUE = '0' OR to_char(t.thread#) = v.VALUE)) i,
-           (SELECT VALUE FROM v\$parameter WHERE NAME = 'user_dump_dest') d";
-    $sql = $sql . ";\n".$sql1;
-    my @sqlResult = ExecuteSQL($sql);
+    my $sql = "alter system dump datafile '".$dbfname{$filenum}."' block ". $fileblock .";";
     my $findMap = 0;
-    my $tracefile = $sqlResult[0];
+    my $tracefile = GetTraceName($sql);
 
     MsgPrint("I","Segment Block Dump Trace $tracefile");
     Trace("Segment Block Dump Trace : $tracefile");
@@ -360,22 +374,9 @@ sub DumpMap{
     {
         $sql =  $sql.$_."\n";
     }
-    $sql = $sql."SELECT d.VALUE || '/' || LOWER(RTRIM(i.INSTANCE, CHR(0))) || '_ora_' ||
-            p.spid || '.trc' trace_file_name
-       FROM (SELECT p.spid
-               FROM v\$mystat m, v\$session s, v\$process p
-               WHERE m.statistic# = 1
-                AND s.SID = m.SID
-                AND p.addr = s.paddr) p,
-            (SELECT t.INSTANCE
-               FROM v\$thread t, v\$parameter v
-              WHERE v.NAME = 'thread'
-                AND (v.VALUE = '0' OR to_char(t.thread#) = v.VALUE)) i,
-            (SELECT VALUE FROM v\$parameter WHERE NAME = 'user_dump_dest') d";
     # print "$sql\n";
+    my $tracefile = GetTraceName($sql);
 
-    my @sqlResult = ExecuteSQL($sql);
-    my $tracefile = $sqlResult[0];
     MsgPrint("I","Data Block Dump Trace : $tracefile");
     Trace("Data Block Dump Trace : $tracefile");
     return $tracefile;
@@ -383,7 +384,7 @@ sub DumpMap{
 
 sub ConverNamebySql{
     my $sql = '';
-    foreach my $name (@undosegname)
+    foreach my $name (@undoInfo)
     {
         Trace("Undo Segment Name: $name");
         $name =~ s/\s+//g;
@@ -417,26 +418,26 @@ sub ConverNamebySql{
 }
 
 sub ConVertUndoSegName{
-    my @undoRname;
-    foreach my $name (@undosegname)
-    {
-        Trace("Undo Segment Name: $name");
-        push @undoRname,ConverVarchar($name);
-    }
-
+    # my @undoRname;
+    my %undo;
     my $PREFIX  = "_CORRUPTED_ROLLBACK_SEGMENTS = (";
     my $FSP     = ",";
     my $POSTFIX = ")";
     my $str;
     $str = "$PREFIX";
-    foreach (@undoRname)
-    {
-        if ($_ =~ /SYSTEM/ || $_ =~ /undo/) {
+    printf ("  %-30s=    %s\n", "UndoSegNum", "UndoSegName");
+    for (my $i = 0; $i < $#undoInfo; $i += 2) {
+        my $undoNum  = ConverNumber($undoInfo[$i]);
+        my $undoName = ConverVarchar($undoInfo[$i + 1]);
+        printf ("  %-30s=    %s\n", $undoNum, $undoName);
+        # undo[ConverNumber($undoInfo[$i])] = ;
+        if ($undoName =~ /SYSTEM/ || $undoName =~ /undo/) {
             next
         } else {
-            $str = "$str$_$FSP";
+            $str = "$str$undoName$FSP";
         }
     }
+
     if ($str =~ /$FSP$/)
     {
         chop($str);
@@ -445,25 +446,15 @@ sub ConVertUndoSegName{
     MsgPrint("I","$str");
 }
 
+
+
+
+
 sub DumpRootDBA {
-    my $sql = "alter system set events 'immediate trace name file_hdrs level 3'";
-    my $sql1 = "SELECT d.VALUE || '/' || LOWER(RTRIM(i.INSTANCE, CHR(0))) || '_ora_' ||
-           p.spid || '.trc' trace_file_name
-      FROM (SELECT p.spid
-              FROM v\$mystat m, v\$session s, v\$process p
-             WHERE m.statistic# = 1
-               AND s.SID = m.SID
-               AND p.addr = s.paddr) p,
-           (SELECT t.INSTANCE
-              FROM v\$thread t, v\$parameter v
-             WHERE v.NAME = 'thread'
-               AND (v.VALUE = '0' OR to_char(t.thread#) = v.VALUE)) i,
-           (SELECT VALUE FROM v\$parameter WHERE NAME = 'user_dump_dest') d";
-    $sql = $sql . ";\n".$sql1;
-    my @sqlResult = ExecuteSQL($sql);
+
     my $findMap = 0;
     my $findTBS = 0;
-    my $tracefile = $sqlResult[0];
+    my $tracefile = GetTraceName("alter system set events 'immediate trace name file_hdrs level 3';");
 
     MsgPrint("I","Datafile Header Block Dump Trace $tracefile");
     Trace("Datafile Header Block Dump Trace : $tracefile");
@@ -497,6 +488,57 @@ sub DumpRootDBA {
         }
         close(GRIDINSTLOG);
     }
+}
+
+
+sub ConverNumber {
+    my $str = shift;
+    my @str1 = split (/\s+/,$str);
+    my $total;
+    my $index;
+    if ($str1[0] eq "80")
+    {
+        $total = 0
+    }
+    if (hex($str1[0]) > 0x80) {
+        $index = hex($str1[0]) - 0xc1;
+        for (my $var = 1; $var <= $#str1; $var++) {
+            $total += (hex($str1[$var]) - 0x01) * (100 ** $index);
+            $index--;
+        }
+    }
+    # if (buf[0] > 0x80) /* 正数 */
+    # {
+    #     //取出长度xx-c1
+    #     index = buf[0] - 0xc1;
+    #     for (i = 1; i < buf_len; i++) {
+    #         /*
+    #         buf[i] - 0x01 每位减去1
+    #         pow(100, index) 取出此位的下标*100
+    #         c2,b,2
+    #         c2-c1=2 ,index=1
+    #         0xb-0x1=0xa=10 ,10*pow(100,1)
+    #         0x2-0x1=0x1=1,1*pow(100,1)
+    #         10*pow(100,1)+1*pow(100,1)
+    #         */
+    #         total += (buf[i] - 0x01) * pow(100, index);
+    #         index--;
+    #     }
+    #     printf("%d%c", total, sep[0]);
+    # }
+    # if (buf[0] < 0x80) /* 负数 */
+    # {
+    #     index = buf[0] - 0x3e;
+    #     for (i = 1; i < buf_len; i++) {
+    #         if (buf[i] == 0x66)
+    #             break;
+    #         total -= (0x65 - buf[i]) * pow(100, -index);
+    #         index++;
+    #     }
+    #     printf("%d%c", total, sep[0]);
+    # }
+    return $total;
+
 }
 
 sub ConverVarchar{
@@ -561,21 +603,24 @@ sub DumpBootStrap{
 
 sub DumpUndo{
     my $undo_trcfile = DumpMap(DumpSegment($undoSegFile,$undoSegBlock));
+
     if (open(GRIDINSTLOG, "< $undo_trcfile"))
     {
+        my $findLine = 0;
         while (<GRIDINSTLOG>)
         {
             chomp();
             next unless /\S/;
-            if ($_ =~ /col  1/)
+            if ($_ =~ /col  [0|1]/)
             {
-                # print $_."\n";
-                my $line = $_;
-                if (length($line) > 12)
+                if (length($_) > 12)
                 {
-                    my @undoname = split(/]/,$line);
-                    push @undosegname,TrimSpace($undoname[1]);
+                    my @str = split(/]/,$_);
+                    push @undoInfo,TrimSpace($str[1]);
+
                 }
+            } elsif ($_ =~ /5f 53 59 53 53 4d/) {
+                push @undoInfo,TrimSpace($_);
             }
         }
         close(GRIDINSTLOG);
@@ -595,3 +640,4 @@ CheckTS();
 DumpBootStrap();
 DumpUndo();
 ConVertUndoSegName();
+
