@@ -1,10 +1,16 @@
 #!/usr/bin/perl
+
+
+# @Author: travel.liu
+# @Date:   2018-04-28 16:18:00
+# @Last Modified by:   travel.liu
+# @Last Modified time: 2018-04-28 16:24:16
 #
-#       Filename:  analyzeundo.pl
-#        Version:  1.1
-#        Created:  2017/01/23 23:59:59
-#         Author:  Bin Liu, bin.liu@enmotech.com
-#
+
+####################################################################################################
+##      travel.liu 2018-04-28  1. modify function GetTraceName                                    ##
+##                             2. add    function ConverNumber                                    ##
+####################################################################################################
 
 use strict;
 use warnings;
@@ -418,7 +424,6 @@ sub ConverNamebySql{
 }
 
 sub ConVertUndoSegName{
-    # my @undoRname;
     my %undo;
     my $PREFIX  = "_CORRUPTED_ROLLBACK_SEGMENTS = (";
     my $FSP     = ",";
@@ -430,7 +435,6 @@ sub ConVertUndoSegName{
         my $undoNum  = ConverNumber($undoInfo[$i]);
         my $undoName = ConverVarchar($undoInfo[$i + 1]);
         printf ("  %-30s=    %s\n", $undoNum, $undoName);
-        # undo[ConverNumber($undoInfo[$i])] = ;
         if ($undoName =~ /SYSTEM/ || $undoName =~ /undo/) {
             next
         } else {
@@ -445,10 +449,6 @@ sub ConVertUndoSegName{
     $str = "$str$POSTFIX";
     MsgPrint("I","$str");
 }
-
-
-
-
 
 sub DumpRootDBA {
 
@@ -490,55 +490,31 @@ sub DumpRootDBA {
     }
 }
 
-
 sub ConverNumber {
     my $str = shift;
     my @str1 = split (/\s+/,$str);
     my $total;
     my $index;
-    if ($str1[0] eq "80")
-    {
+    if (hex($str1[0]) == 0x80) {
+        # 0
         $total = 0
-    }
-    if (hex($str1[0]) > 0x80) {
+    } elsif (hex($str1[0]) > 0x80) {
+        # 正数
         $index = hex($str1[0]) - 0xc1;
         for (my $var = 1; $var <= $#str1; $var++) {
             $total += (hex($str1[$var]) - 0x01) * (100 ** $index);
             $index--;
         }
     }
-    # if (buf[0] > 0x80) /* 正数 */
-    # {
-    #     //取出长度xx-c1
-    #     index = buf[0] - 0xc1;
-    #     for (i = 1; i < buf_len; i++) {
-    #         /*
-    #         buf[i] - 0x01 每位减去1
-    #         pow(100, index) 取出此位的下标*100
-    #         c2,b,2
-    #         c2-c1=2 ,index=1
-    #         0xb-0x1=0xa=10 ,10*pow(100,1)
-    #         0x2-0x1=0x1=1,1*pow(100,1)
-    #         10*pow(100,1)+1*pow(100,1)
-    #         */
-    #         total += (buf[i] - 0x01) * pow(100, index);
-    #         index--;
+    # elsif (hex($str1[0]) < 0x80) {
+    #     # 负数
+    #     $index = hex($str1[0]) - 0x3e;
+    #     for (my $var = 1; $var <= $#str1; $var++) {
+    #         $total += (hex($str1[$var]) - 0x01) * (100 ** -$index);
+    #         $index--;
     #     }
-    #     printf("%d%c", total, sep[0]);
-    # }
-    # if (buf[0] < 0x80) /* 负数 */
-    # {
-    #     index = buf[0] - 0x3e;
-    #     for (i = 1; i < buf_len; i++) {
-    #         if (buf[i] == 0x66)
-    #             break;
-    #         total -= (0x65 - buf[i]) * pow(100, -index);
-    #         index++;
-    #     }
-    #     printf("%d%c", total, sep[0]);
     # }
     return $total;
-
 }
 
 sub ConverVarchar{
